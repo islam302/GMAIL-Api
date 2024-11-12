@@ -44,12 +44,10 @@ class GoogleExtractor:
             results = service.users().messages().list(
                 userId='me',
                 labelIds=['SENT'] if is_sent else ['INBOX'],
-                maxResults=100,
                 pageToken=page_token
             ).execute()
 
             messages.extend(results.get('messages', []))
-
             page_token = results.get('nextPageToken')
 
             if not page_token:
@@ -71,7 +69,7 @@ class GoogleExtractor:
                     sender_or_recipient = header['value']
 
             if sender_or_recipient:
-                sanitized_sender = self.file_name(sender_or_recipient)
+                sanitized_sender = self.sanitize_filename(sender_or_recipient)
                 folder_path = os.path.join('emails', folder_name, sanitized_sender)
                 if not os.path.exists(folder_path):
                     os.makedirs(folder_path)
