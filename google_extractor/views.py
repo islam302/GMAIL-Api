@@ -1,66 +1,154 @@
+import os
+import json
+import base64
+import re
 from django.shortcuts import redirect
 from django.http import JsonResponse
-import os
-import google.auth
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
+from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
+
+load_dotenv()
+
+# ????? ????????? ?? ??? .env
+CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
+CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.send']
+REDIRECT_URI = 'http://127.0.0.1:8000/api/google_auth/callback/'
 
 
 class GoogleExtractor:
 
-    def __init__(self):
-        load_dotenv()
-        openai.api_key = os.getenv('GOOGLE_CLOUD_CONSOLE')
-        self.SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+    def authenticate_gmail(self, authorization_response):
+        flow = Flow.from_client_secrets_file(
+            'credentials.json',
+            scopes=SCOPES,
+            redirect_uri=REDIRECT_URI
+        )
+        flow.fetch_token(authorization_response=authorization_response)
 
+        creds = flow.credentials
 
-    def authenticate_gmail(self):
-        creds = None
-        # Load credentials from token if it exists
-        if os.path.exists('token.json'):
-            creds = Credentials.from_authorized_user_file('token.json', self.SCOPES)
-
-        # If there are no valid credentials, let the user log in
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-            else:
-                flow = InstalledAppFlow.from_client_secrets_file('credentials.json', self.SCOPES)
-                creds = flow.run_local_server(port=0)
-
-            # Save the credentials for the next run
-            with open('token.json', 'w') as token:
-                token.write(creds.to_json())
+        # ??? ?????? ???????? ????????? ?????????
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
 
         return creds
 
-    def get_emails(self, service):
-        results = service.users().messages().list(userId='me', labelIds=['INBOX'], maxResults=10).execute()
-        messages = results.get('messages', [])
+    def sanitize_filename(self, filename):
+        """Sanitize a string to be a valid Windows filename."""
+        # Replace any invalid characters with an underscore
+        return re.sub(r'[<>:"/\\|?*]', '_', filename)
 
-        senders = []
-        recipients = []
+    def get_all_emails(self, service, folder_name, is_sent=False):
+        """??? ???? ??????? ?? ?????? ??? ?? ??? ??????? ?? ??????? ????????."""
+        messages = []
+        page_token = None
 
+        while True:
+            results = service.users().messages().list(
+                userId='me',
+                labelIds=['SENT'] if is_sent else ['INBOX'],
+                maxResults=100,  # ???? 100 ????? ?? ?????
+                pageToken=page_token
+            ).execute()
+
+            messages.extend(results.get('messages', []))
+
+            # ??? ???? ???? ???? ????? ????? ?? ???????
+            page_token = results.get('nextPageToken')
+
+            if not page_token:
+                break  # ?? ???? ????? ??????
+
+        if not messages:
+            return []
+
+        # ?????? ?? ????? ??? ?? ????? ??????
         for message in messages:
             msg = service.users().messages().get(userId='me', id=message['id'], format='full').execute()
             headers = msg['payload']['headers']
+            body = self.get_body(msg)  # ?????? ??? ????? ???????? ?????? get_body
+
+            sender_or_recipient = None
             for header in headers:
-                if header['name'] == 'From':
-                    senders.append(header['value'])
-                elif header['name'] == 'To':
-                    recipients.append(header['value'])
+                if header['name'] == 'From' and not is_sent:
+                    sender_or_recipient = header['value']
+                elif header['name'] == 'To' and is_sent:
+                    sender_or_recipient = header['value']
 
-        return senders, recipients
+            if sender_or_recipient:
+                # ??????? sanitize_filename ?????? ???????
+                sanitized_sender = self.sanitize_filename(sender_or_recipient)
+                folder_path = os.path.join('emails', folder_name, sanitized_sender)
+                if not os.path.exists(folder_path):
+                    os.makedirs(folder_path)
+
+                # ??????? sanitized sender ???? ?????
+                file_path = os.path.join(folder_path, f'{message["id"]}.txt')
+                with open(file_path, 'w', encoding='utf-8') as file:
+                    file.write(f"From/To: {sender_or_recipient}\n")
+                    file.write(f"Message Body: {body}\n")
+
+        return True
+
+    def get_body(self, msg):
+        """????? ????? ??? ??????? (body) ???? ????."""
+        body = ''
+        if 'parts' in msg['payload']:
+            for part in msg['payload']['parts']:
+                if part['mimeType'] == 'text/plain':
+                    body = part['body'].get('data', '')
+                    break
+        elif 'body' in msg['payload']:
+            body = msg['payload']['body'].get('data', '')
+
+        if body:
+            body = base64.urlsafe_b64decode(body).decode('utf-8')
+
+        return body
 
 
-def extract_emails(request):
+def google_auth(request):
     extractor = GoogleExtractor()
-    creds = extractor.authenticate_gmail()
+    flow = Flow.from_client_secrets_file(
+        'credentials.json',
+        scopes=['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.send'],
+        redirect_uri=REDIRECT_URI
+    )
+
+    authorization_url, state = flow.authorization_url(
+        access_type='offline',
+        include_granted_scopes='true',
+        prompt='consent'
+    )
+
+    request.session['state'] = state
+
+    return redirect(authorization_url)
+
+
+def google_auth_callback(request):
+    extractor = GoogleExtractor()
+    state = request.session.get('state')
+
+    flow = Flow.from_client_secrets_file(
+        'credentials.json',
+        scopes=['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.send'],
+        state=state,
+        redirect_uri=REDIRECT_URI
+    )
+
+    flow.fetch_token(authorization_response=request.build_absolute_uri())
+
+    creds = flow.credentials
+
     service = build('gmail', 'v1', credentials=creds)
 
-    senders, recipients = extractor.get_emails(service)
+    # ??????? ??????? ???????
+    extractor.get_all_emails(service, 'incoming_emails')
 
-    return JsonResponse({"message": "Emails retrieved successfully.", "senders": senders, "recipients": recipients})
+    # ??????? ??????? ???????
+    extractor.get_all_emails(service, 'sent_emails', is_sent=True)
+
+    return JsonResponse({"message": "Emails retrieved and saved successfully."})
