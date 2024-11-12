@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ????? ????????? ?? ??? .env
 CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
 CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.send']
@@ -29,19 +28,15 @@ class GoogleExtractor:
 
         creds = flow.credentials
 
-        # ??? ?????? ???????? ????????? ?????????
         with open('token.json', 'w') as token:
             token.write(creds.to_json())
 
         return creds
 
-    def sanitize_filename(self, filename):
-        """Sanitize a string to be a valid Windows filename."""
-        # Replace any invalid characters with an underscore
+    def file_name(self, filename):
         return re.sub(r'[<>:"/\\|?*]', '_', filename)
 
     def get_all_emails(self, service, folder_name, is_sent=False):
-        """??? ???? ??????? ?? ?????? ??? ?? ??? ??????? ?? ??????? ????????."""
         messages = []
         page_token = None
 
@@ -49,26 +44,24 @@ class GoogleExtractor:
             results = service.users().messages().list(
                 userId='me',
                 labelIds=['SENT'] if is_sent else ['INBOX'],
-                maxResults=100,  # ???? 100 ????? ?? ?????
+                maxResults=100,
                 pageToken=page_token
             ).execute()
 
             messages.extend(results.get('messages', []))
 
-            # ??? ???? ???? ???? ????? ????? ?? ???????
             page_token = results.get('nextPageToken')
 
             if not page_token:
-                break  # ?? ???? ????? ??????
+                break
 
         if not messages:
             return []
 
-        # ?????? ?? ????? ??? ?? ????? ??????
         for message in messages:
             msg = service.users().messages().get(userId='me', id=message['id'], format='full').execute()
             headers = msg['payload']['headers']
-            body = self.get_body(msg)  # ?????? ??? ????? ???????? ?????? get_body
+            body = self.get_body(msg)
 
             sender_or_recipient = None
             for header in headers:
@@ -78,13 +71,11 @@ class GoogleExtractor:
                     sender_or_recipient = header['value']
 
             if sender_or_recipient:
-                # ??????? sanitize_filename ?????? ???????
-                sanitized_sender = self.sanitize_filename(sender_or_recipient)
+                sanitized_sender = self.file_name(sender_or_recipient)
                 folder_path = os.path.join('emails', folder_name, sanitized_sender)
                 if not os.path.exists(folder_path):
                     os.makedirs(folder_path)
 
-                # ??????? sanitized sender ???? ?????
                 file_path = os.path.join(folder_path, f'{message["id"]}.txt')
                 with open(file_path, 'w', encoding='utf-8') as file:
                     file.write(f"From/To: {sender_or_recipient}\n")
@@ -93,7 +84,6 @@ class GoogleExtractor:
         return True
 
     def get_body(self, msg):
-        """????? ????? ??? ??????? (body) ???? ????."""
         body = ''
         if 'parts' in msg['payload']:
             for part in msg['payload']['parts']:
@@ -145,10 +135,8 @@ def google_auth_callback(request):
 
     service = build('gmail', 'v1', credentials=creds)
 
-    # ??????? ??????? ???????
     extractor.get_all_emails(service, 'incoming_emails')
 
-    # ??????? ??????? ???????
     extractor.get_all_emails(service, 'sent_emails', is_sent=True)
 
     return JsonResponse({"message": "Emails retrieved and saved successfully."})
